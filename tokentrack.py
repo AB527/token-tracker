@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
+import shutil
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -57,6 +60,143 @@ def price(rec: dict, rates: dict) -> float:
     ) / 1_000_000
 
 
+# ---------------------------------------------------------------- parse cache
+
+CACHE_DIR = os.environ.get("TOKENTRACK_CACHE") or os.path.expanduser("~/.cache/token-tracker/parse-v1")
+CACHE_CAP_BYTES = 64 * 1024 * 1024
+
+# Set to a dict by the harness to collect per-file parse timings. None = off.
+PROFILE = None
+
+
+class ParseCache:
+    """Memoizes the parsed records of one session file.
+
+    Session files are append-only and mostly cold: yesterday's transcripts never
+    change again, so re-reading and re-parsing every one of them on each run is
+    pure waste. The key includes mtime and size, so an active session that grew
+    since the last run misses and is re-read.
+    """
+
+    def __init__(self, enabled=True, cap=CACHE_CAP_BYTES, directory=CACHE_DIR):
+        self.enabled = enabled
+        self.cap = cap
+        self.dir = directory
+        self.hits = self.misses = self.evictions = 0
+        self.hit_ns = []      # per-lookup latency, so the harness can report percentiles
+        self.miss_ns = []
+        self.bytes_in = self.bytes_out = 0
+        if enabled:
+            os.makedirs(self.dir, exist_ok=True)
+
+    def _path(self, fp):
+        try:
+            st = os.stat(fp)
+        except OSError:
+            return None
+        sig = f"{os.path.realpath(fp)}:{st.st_mtime_ns}:{st.st_size}"
+        return os.path.join(self.dir, hashlib.sha1(sig.encode()).hexdigest() + ".json")
+
+    def get(self, fp):
+        if not self.enabled:
+            return None
+        t0 = time.perf_counter_ns()
+        path = self._path(fp)
+        try:
+            with open(path, "rb") as fh:
+                blob = fh.read()
+            recs = json.loads(blob)
+        except (OSError, TypeError, json.JSONDecodeError):
+            self.misses += 1
+            self.miss_ns.append(time.perf_counter_ns() - t0)
+            return None
+        os.utime(path, None)  # touch, so eviction can drop the least recently used
+        self.bytes_in += len(blob)
+        self.hits += 1
+        self.hit_ns.append(time.perf_counter_ns() - t0)
+        return recs
+
+    def put(self, fp, recs):
+        if not self.enabled:
+            return
+        path = self._path(fp)
+        if not path:
+            return
+        try:
+            blob = json.dumps(recs).encode()
+            tmp = path + f".{os.getpid()}.tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(blob)
+            os.replace(tmp, path)  # atomic, so a concurrent run never reads a half file
+            self.bytes_out += len(blob)
+        except OSError:
+            pass
+
+    def usage(self):
+        """(bytes, entries) currently held."""
+        total = n = 0
+        try:
+            for name in os.listdir(self.dir):
+                try:
+                    total += os.stat(os.path.join(self.dir, name)).st_size
+                    n += 1
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        return total, n
+
+    def evict(self):
+        """Drop least-recently-used entries until the directory fits the cap."""
+        if not self.enabled:
+            return
+        try:
+            entries = []
+            for name in os.listdir(self.dir):
+                p = os.path.join(self.dir, name)
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                entries.append((st.st_atime, st.st_size, p))
+        except OSError:
+            return
+        total = sum(e[1] for e in entries)
+        if total <= self.cap:
+            return
+        for _, size, p in sorted(entries):
+            try:
+                os.remove(p)
+            except OSError:
+                continue
+            total -= size
+            self.evictions += 1
+            if total <= self.cap:
+                break
+
+
+CACHE = ParseCache(enabled=False)
+
+
+def _cached_parse(fp, parser):
+    """Parse one session file, through the cache, timing it for the harness."""
+    t0 = time.perf_counter_ns()
+    recs = CACHE.get(fp)
+    cached = recs is not None
+    if not cached:
+        recs = parser(fp)
+        CACHE.put(fp, recs)
+    if PROFILE is not None:
+        try:
+            size = os.path.getsize(fp)
+        except OSError:
+            size = 0
+        PROFILE["files"].append(
+            {"ns": time.perf_counter_ns() - t0, "cached": cached, "rows": len(recs), "bytes": size}
+        )
+    return recs
+
+
 # ---------------------------------------------------------------- parsing
 
 
@@ -69,6 +209,11 @@ def _iso(ts) -> str | None:
     return str(ts)
 
 
+# Failures seen while reading. Only covers files actually parsed this run:
+# a cache hit never re-reads the file, so these counts fall as the cache warms.
+STATS = {"bad_lines": 0, "unreadable_files": 0, "lines": 0, "bytes": 0}
+
+
 def _read_json_lines(fp: str):
     try:
         with open(fp, errors="replace") as fh:
@@ -76,11 +221,15 @@ def _read_json_lines(fp: str):
                 line = line.strip()
                 if not line:
                     continue
+                STATS["lines"] += 1
+                STATS["bytes"] += len(line)
                 try:
                     yield json.loads(line)
                 except json.JSONDecodeError:
+                    STATS["bad_lines"] += 1
                     continue
     except OSError:
+        STATS["unreadable_files"] += 1
         return
 
 
@@ -99,20 +248,16 @@ def _session_cwd(fp: str):
     return None
 
 
-def collect_claude_code():
-    """Claude Code writes several rows per API request; dedupe on (requestId, message id)."""
-    seen, out = set(), []
-    for fp, d in _iter_json_lines(os.path.join(CLAUDE_DIR, "**", "*.jsonl")):
+def _parse_claude_file(fp: str):
+    """Parse one Claude Code transcript. Dedupe happens globally, after caching."""
+    out = []
+    for d in _read_json_lines(fp):
         if d.get("type") != "assistant":
             continue
         msg = d.get("message") or {}
         usage = msg.get("usage")
         if not usage:
             continue
-        key = (d.get("requestId"), msg.get("id"))
-        if key in seen:
-            continue
-        seen.add(key)
 
         model = normalize_model(msg.get("model") or "unknown")
         if model in ("<synthetic>", "unknown"):
@@ -127,6 +272,7 @@ def collect_claude_code():
         cwd = d.get("cwd") or ""
         out.append(
             {
+                "_key": [d.get("requestId"), msg.get("id")],
                 "ts": _iso(d.get("timestamp")),
                 "source": "claude-code",
                 "provider": "anthropic",
@@ -142,50 +288,72 @@ def collect_claude_code():
     return out
 
 
+def collect_claude_code():
+    """Claude Code writes up to six rows per API request; dedupe on (requestId, message id)."""
+    seen, out = set(), []
+    for fp in glob.iglob(os.path.join(CLAUDE_DIR, "**", "*.jsonl"), recursive=True):
+        for r in _cached_parse(fp, _parse_claude_file):
+            key = tuple(r["_key"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def _parse_omp_file(fp: str):
+    """Parse one omp session file. Dedupe happens globally, after caching."""
+    cwd = _session_cwd(fp)
+    if cwd:
+        project = os.path.basename(cwd.rstrip("/")) or cwd
+    else:
+        # Fall back to the dir name: "-Code-learning-backend" -> "learning-backend"
+        rel = os.path.relpath(fp, OMP_DIR).split(os.sep)[0]
+        project = rel.lstrip("-").split("-", 1)[-1] or "unknown"
+
+    out = []
+    for d in _read_json_lines(fp):
+        if d.get("type") != "message":
+            continue
+        msg = d.get("message") or {}
+        usage = msg.get("usage")
+        if not usage or msg.get("role") != "assistant":
+            continue
+
+        cttl = usage.get("cttl") or {}
+        cw5m = cttl.get("ephemeral5m")
+        cw1h = cttl.get("ephemeral1h")
+        if cw5m is None and cw1h is None:
+            cw5m, cw1h = usage.get("cacheWrite", 0) or 0, 0
+
+        out.append(
+            {
+                "_key": msg.get("responseId") or d.get("id"),
+                "ts": _iso(d.get("timestamp") or msg.get("timestamp")),
+                "source": "omp",
+                "provider": msg.get("provider") or "unknown",
+                "project": project,
+                "model": normalize_model(msg.get("model") or "unknown"),
+                "in": usage.get("input", 0) or 0,
+                "out": usage.get("output", 0) or 0,
+                "cr": usage.get("cacheRead", 0) or 0,
+                "cw5m": cw5m or 0,
+                "cw1h": cw1h or 0,
+            }
+        )
+    return out
+
+
 def collect_omp():
     """omp session JSONL: assistant messages carry message.usage inline."""
     seen, out = set(), []
     for fp in glob.iglob(os.path.join(OMP_DIR, "**", "*.jsonl"), recursive=True):
-        cwd = _session_cwd(fp)
-        if cwd:
-            project = os.path.basename(cwd.rstrip("/")) or cwd
-        else:
-            # Fall back to the dir name: "-Code-learning-backend" -> "learning-backend"
-            rel = os.path.relpath(fp, OMP_DIR).split(os.sep)[0]
-            project = rel.lstrip("-").split("-", 1)[-1] or "unknown"
-
-        for d in _read_json_lines(fp):
-            if d.get("type") != "message":
-                continue
-            msg = d.get("message") or {}
-            usage = msg.get("usage")
-            if not usage or msg.get("role") != "assistant":
-                continue
-            key = msg.get("responseId") or d.get("id")
+        for r in _cached_parse(fp, _parse_omp_file):
+            key = r["_key"]
             if key in seen:
                 continue
             seen.add(key)
-
-            cttl = usage.get("cttl") or {}
-            cw5m = cttl.get("ephemeral5m")
-            cw1h = cttl.get("ephemeral1h")
-            if cw5m is None and cw1h is None:
-                cw5m, cw1h = usage.get("cacheWrite", 0) or 0, 0
-
-            out.append(
-                {
-                    "ts": _iso(d.get("timestamp") or msg.get("timestamp")),
-                    "source": "omp",
-                    "provider": msg.get("provider") or "unknown",
-                    "project": project,
-                    "model": normalize_model(msg.get("model") or "unknown"),
-                    "in": usage.get("input", 0) or 0,
-                    "out": usage.get("output", 0) or 0,
-                    "cr": usage.get("cacheRead", 0) or 0,
-                    "cw5m": cw5m or 0,
-                    "cw1h": cw1h or 0,
-                }
-            )
+            out.append(r)
     return out
 
 
@@ -307,10 +475,19 @@ def main():
     p.add_argument("--pricing", help="path to an alternate pricing.json")
     p.add_argument("--usd", action="store_true", help="show costs in USD instead of the configured currency")
     p.add_argument("--rate", type=float, help="override the per-USD conversion rate")
+    p.add_argument("--harness", action="store_true",
+                   help="instrument the run: cache, execution and resource metrics")
+    p.add_argument("--no-cache", action="store_true", help="bypass the parse cache")
+    p.add_argument("--clear-cache", action="store_true", help="delete the parse cache and exit")
     args = p.parse_args()
 
     if args.period:
         args.days = {"week": 7, "month": 30, "all": None}[args.period]
+
+    if args.clear_cache:
+        shutil.rmtree(CACHE_DIR, ignore_errors=True)
+        print(f"cleared {CACHE_DIR}")
+        return
 
     rates, cur = load_pricing(args.pricing)
     if args.usd:
@@ -318,7 +495,19 @@ def main():
     if args.rate:
         cur = dict(cur, per_usd=args.rate)
     CUR.update(cur)
-    recs = collect(rates, args.days, tuple(args.source or ["claude-code", "omp"]))
+
+    sources = tuple(args.source or ["claude-code", "omp"])
+    harness = None
+    if args.harness:
+        if HERE not in sys.path:
+            sys.path.insert(0, HERE)  # so --harness works through a symlinked entrypoint
+        import harness as harness_mod
+        harness, recs = harness_mod.run(rates, args.days, sources, use_cache=not args.no_cache)
+    else:
+        global CACHE
+        CACHE = ParseCache(enabled=not args.no_cache)
+        recs = collect(rates, args.days, sources)
+        CACHE.evict()
 
     if args.raw:
         json.dump(recs, sys.stdout, indent=1)
@@ -347,6 +536,8 @@ def main():
                     for k, v in _agg(recs, lambda r: (r["day"], r["source"], r["model"], r["project"])).items()
                 ],
         }
+        if harness:
+            payload["harness"] = harness
         if args.html:
             tpl = os.path.join(HERE, "dashboard_template.html")
             with open(tpl) as fh:
@@ -360,6 +551,8 @@ def main():
         return
 
     report(recs, args)
+    if harness:
+        harness_mod.render(harness)
 
 
 if __name__ == "__main__":

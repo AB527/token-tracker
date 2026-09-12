@@ -5,7 +5,7 @@
     color-scheme: light;
     --surface-0: #f2f3f5; --surface-1: #fcfcfb; --border: #e0e2e6;
     --text-primary: #0d0f12; --text-secondary: #4e535c; --text-muted: #787d86;
-    --s1: #2a78d6; --s2: #eb6834; --grid: #e8e7e2;
+    --s1: #2a78d6; --s2: #eb6834; --grid: #e8e7e2; --warn: #b0561a; --good: #2f7d4f;
   }
   :root:not([data-theme="light"]) { }
   @media (prefers-color-scheme: dark) {
@@ -13,14 +13,14 @@
       color-scheme: dark;
       --surface-0: #101215; --surface-1: #1a1a19; --border: #2f3238;
       --text-primary: #ffffff; --text-secondary: #bcc0c7; --text-muted: #868b93;
-      --s1: #3987e5; --s2: #d95926; --grid: #2a2c30;
+      --s1: #3987e5; --s2: #d95926; --grid: #2a2c30; --warn: #e0954a; --good: #5cb87f;
     }
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
     --surface-0: #101215; --surface-1: #1a1a19; --border: #2f3238;
     --text-primary: #ffffff; --text-secondary: #bcc0c7; --text-muted: #868b93;
-    --s1: #3987e5; --s2: #d95926; --grid: #2a2c30;
+    --s1: #3987e5; --s2: #d95926; --grid: #2a2c30; --warn: #e0954a; --good: #5cb87f;
   }
 
   body { background: var(--surface-0); color: var(--text-primary);
@@ -82,6 +82,21 @@
   tbody tr:last-child td { border-bottom: none; }
   .tablewrap { overflow-x: auto; }
   .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 7px; }
+
+  /* harness metric rows */
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 34px; }
+  .mrow { display: flex; justify-content: space-between; align-items: baseline; gap: 14px;
+    padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .mrow:last-child { border-bottom: none; }
+  .mrow .k { color: var(--text-secondary); }
+  .mrow .v { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums;
+    white-space: nowrap; }
+  .mrow .v small { color: var(--text-muted); font-size: 11.5px; margin-left: 7px; }
+  .mrow .v.warn { color: var(--warn); }
+  .mrow .v.good { color: var(--good); }
+  .subhead { font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--text-muted); margin: 18px 0 2px; font-weight: 600; }
+  .subhead:first-child { margin-top: 0; }
 
   /* period toggle */
   .periods { display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 20px;
@@ -146,6 +161,22 @@
       <thead><tr><th>Model</th><th>Msgs</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Cost</th></tr></thead>
       <tbody id="mtable"></tbody>
     </table></div>
+  </div>
+
+  <div class="sect" id="harnesssect" hidden>
+    <h2>Harness</h2>
+    <p class="note" id="hnote"></p>
+    <div class="tiles" id="htiles"></div>
+    <div class="metrics">
+      <div>
+        <div class="subhead">Per-file parse latency</div>
+        <div id="hlat"></div>
+      </div>
+      <div>
+        <div class="subhead">Resource and system</div>
+        <div id="hsys"></div>
+      </div>
+    </div>
   </div>
   </div>
 </div>
@@ -306,6 +337,75 @@ periods.addEventListener('click', e => {
   tip.style.opacity = 0;
   render(+btn.dataset.days);
 });
+
+/* ---- harness (only present when generated with --harness) ---- */
+if (DATA.harness) {
+  const H = DATA.harness, c = H.cache, e = H.execution, sys = H.system, ig = H.integrity;
+  const pct = x => (x * 100).toFixed(1) + '%';
+  const bytes = n => {
+    for (const [u, d] of [['GiB', 2**30], ['MiB', 2**20], ['KiB', 2**10]])
+      if (Math.abs(n) >= d) return (n / d).toFixed(1) + ' ' + u;
+    return Math.round(n) + ' B';
+  };
+  const row = (k, v, note, cls) =>
+    `<div class="mrow"><span class="k">${k}</span><span class="v ${cls || ''}">${v}` +
+    `${note ? `<small>${note}</small>` : ''}</span></div>`;
+
+  document.getElementById('harnesssect').hidden = false;
+  document.getElementById('hnote').textContent =
+    `Measured while collecting: ${e.messages.toLocaleString()} messages from ` +
+    `${e.files.toLocaleString()} files in ${e.wall_s.toFixed(2)}s. ` +
+    `Metrics with no source in this tool (database queries, API calls, lock contention) are omitted rather than reported as zero.`;
+
+  document.getElementById('htiles').innerHTML = [
+    ['Cache hit rate', c.enabled ? pct(c.hit_rate) : 'off',
+      c.enabled ? `${c.hits.toLocaleString()} of ${c.accesses.toLocaleString()} lookups` : 'parse cache disabled'],
+    ['Wall time', e.wall_s.toFixed(2) + 's', `${pct(e.cpu_utilization)} CPU, ${e.cpu_s.toFixed(2)}s busy`],
+    ['Throughput', Math.round(e.msgs_per_s).toLocaleString(), `messages/s, ${e.mib_per_s.toFixed(1)} MiB/s`],
+    ['Peak memory', Math.round(e.peak_rss_mib) + ' MiB', `${sys.tracked_objects.toLocaleString()} tracked objects`],
+  ].map(([k, v, d]) =>
+    `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+
+  /* The single slowest file runs ~200x the mean, so it is reported as a number
+     below rather than put on this scale, where it would flatten every other bar. */
+  const lat = [['mean', e.mean_file_ms], ['median', e.median_file_ms],
+               ['p95', e.p95_file_ms], ['p99', e.p99_file_ms]];
+  const latMax = Math.max(...lat.map(l => l[1])) || 1;
+  document.getElementById('hlat').innerHTML = lat.map(([k, v]) => `
+    <div class="hbar">
+      <span class="lbl">${k}</span>
+      <span class="track"><span class="fill" style="width:${Math.max(100 * v / latMax, 0.6)}%;background:var(--s1)"></span></span>
+      <span class="amt">${v.toFixed(2)} ms</span>
+    </div>`).join('') +
+    row('slowest file', e.slowest_file_ms.toFixed(2) + ' ms', 'off scale') +
+    `<div class="subhead">Parse cache</div>` +
+    (c.enabled ? (
+      row('Utilization', pct(c.utilization), `${bytes(c.bytes_used)} of ${bytes(c.bytes_cap)}`) +
+      row('Entries', c.entries.toLocaleString()) +
+      row('Evictions', c.evictions.toLocaleString(), 'LRU') +
+      row('Hit latency', c.hit_latency_us.toFixed(0) + ' us', `p95 ${c.p95_hit_latency_us.toFixed(0)} us`)
+    ) : row('Status', 'disabled', 'run without --no-cache'));
+
+  document.getElementById('hsys').innerHTML =
+    row('Lines parsed', sys.lines_parsed.toLocaleString(), bytes(sys.bytes_parsed)) +
+    (sys.io_available
+      ? row('Disk read', bytes(sys.read_bytes), `${bytes(sys.read_syscall_bytes)} via syscalls`) +
+        row('Disk write', bytes(sys.write_bytes), 'cache writes')
+      : '') +
+    row('Threads', String(sys.threads), `${sys.threads_created >= 0 ? '+' : ''}${sys.threads_created} created`) +
+    row('GC runs', sys.gc_collections.reduce((a, b) => a + b, 0).toLocaleString(),
+        `gen0 ${sys.gc_collections[0]} / gen1 ${sys.gc_collections[1]} / gen2 ${sys.gc_collections[2]}`) +
+    row('Context switches', sys.voluntary_ctx_switches.toLocaleString(),
+        `${sys.involuntary_ctx_switches.toLocaleString()} involuntary`) +
+    `<div class="subhead">Failures this run</div>` +
+    row('Malformed lines', ig.bad_lines.toLocaleString(), pct(ig.failure_rate) + ' of lines',
+        ig.bad_lines ? 'warn' : 'good') +
+    row('Unreadable files', ig.unreadable_files.toLocaleString(), '', ig.unreadable_files ? 'warn' : 'good') +
+    row('Unpriced messages', ig.unpriced_messages.toLocaleString(),
+        ig.unpriced_models.length ? esc(ig.unpriced_models.join(', ')) : 'every model has a rate',
+        ig.unpriced_messages ? 'warn' : 'good') +
+    row('Files from cache', ig.files_from_cache.toLocaleString(), `${ig.files_reparsed.toLocaleString()} reparsed`);
+}
 
 render(0);
 </script>

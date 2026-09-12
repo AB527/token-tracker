@@ -40,6 +40,9 @@ tokens --source omp         # one tool only (repeatable)
 tokens --top 20             # show more projects
 tokens --usd                # costs in USD instead of the configured currency
 tokens --rate 83.2          # override the conversion rate for one run
+tokens --harness            # instrument the run (see below)
+tokens --no-cache           # bypass the parse cache
+tokens --clear-cache        # delete the parse cache
 tokens --html               # write dashboard.html
 tokens --json               # aggregates, for other tooling
 tokens --raw                # every priced message
@@ -77,6 +80,52 @@ reads the same whenever it is opened.
 
 `dashboard.html` is gitignored: it contains your real spend and project names.
 
+## Harness
+
+`tokens --harness` instruments the collection run and reports what it actually
+did. Add `--html` to put the same metrics on the dashboard.
+
+```
+Harness  33,378 messages from 883 files in 0.12s
+
+Cache performance (parse cache)
+  hit rate             99.7%   880 of 883 accesses
+  miss rate             0.3%   3 reparsed from source
+  latency                67us  mean hit, p95 179us, miss 106us
+  evictions                0   LRU, over a 64.0 MiB cap
+  utilization          12.8%   8.2 MiB across 897 entries
+
+Execution performance
+  total                0.12s   collect 0.12s, evict 0.002s
+  per file          mean 0.10ms  median 0.04ms, p95 0.19ms, p99 0.66ms
+  throughput         278,543   messages/s  (35.7 MiB/s)
+  cpu                   100%   0.12s of 0.12s wall
+  peak memory            55 MiB
+```
+
+It also reports disk I/O, context switches, thread count, GC activity, and the
+failures the run hit — malformed JSONL lines, unreadable files, and messages
+whose model has no rate.
+
+**What it deliberately does not report.** Database queries, API calls, network
+requests and data transferred, and lock contention are absent, not zero. This
+tool has no database, makes no network calls, and is single-threaded, so those
+numbers would be decoration rather than measurement. Test coverage is likewise
+absent: there is no test suite yet, and a coverage figure computed against no
+tests is worse than none.
+
+### The parse cache
+
+`--harness` exists partly because there is now a cache worth measuring. Parsed
+session files are memoized under `~/.cache/token-tracker/`, keyed on path +
+mtime + size. Old transcripts never change, so they are parsed once ever; an
+active session that grew since the last run misses and is re-read.
+
+On ~880 files it takes a cold run from **1.24s to 0.10s**. The cache is
+correctness-neutral — `--no-cache` produces byte-identical aggregates — and
+bounded at 64 MiB, evicting least-recently-used entries. `TOKENTRACK_CACHE`
+overrides the location.
+
 ## How it works
 
 Both tools append one JSON object per line to a session file, and assistant
@@ -106,6 +155,13 @@ effort changes how many tokens you spend, not the rate.
 
 Project names come from each session's recorded `cwd`, falling back to the
 encoded directory name.
+
+| File | Role |
+|---|---|
+| `tokentrack.py` | collector, pricing, CLI |
+| `harness.py` | `--harness` instrumentation |
+| `pricing.json` | rate table and display currency |
+| `dashboard_template.html` | dashboard, with a `/*__DATA__*/` slot |
 
 ## Costs
 
