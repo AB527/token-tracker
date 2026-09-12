@@ -1,0 +1,14 @@
+# Generated dashboards contain your real usage data and project names.
+dashboard.html
+*.dashboard.html
+
+# Local rate/currency overrides
+pricing.local.json
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.DS_Store
+*.swp

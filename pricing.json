@@ -1,0 +1,118 @@
+{
+  "_comment": "USD per 1M tokens. Edit freely - tokentrack reads this at runtime.",
+  "_anthropic_source": "Anthropic list pricing. cache_write_5m = 1.25x input, cache_write_1h = 2x input, cache_read = 0.1x input.",
+  "_google_source": "Public Gemini API pricing, Sept 2026. All Flash tiers (3.6/3.7/3.8) share $0.75 in / $3.75 out introductory rates through 2026-12-31, then double. Cache rates approximate.",
+  "models": {
+    "claude-opus-5": {
+      "in": 5.0,
+      "out": 25.0,
+      "cw5m": 6.25,
+      "cw1h": 10.0,
+      "cr": 0.5
+    },
+    "claude-opus-4-8": {
+      "in": 5.0,
+      "out": 25.0,
+      "cw5m": 6.25,
+      "cw1h": 10.0,
+      "cr": 0.5
+    },
+    "claude-opus-4-7": {
+      "in": 5.0,
+      "out": 25.0,
+      "cw5m": 6.25,
+      "cw1h": 10.0,
+      "cr": 0.5
+    },
+    "claude-opus-4-6": {
+      "in": 5.0,
+      "out": 25.0,
+      "cw5m": 6.25,
+      "cw1h": 10.0,
+      "cr": 0.5
+    },
+    "claude-sonnet-5": {
+      "in": 2.0,
+      "out": 10.0,
+      "cw5m": 2.5,
+      "cw1h": 4.0,
+      "cr": 0.2
+    },
+    "claude-sonnet-4-6": {
+      "in": 3.0,
+      "out": 15.0,
+      "cw5m": 3.75,
+      "cw1h": 6.0,
+      "cr": 0.3
+    },
+    "claude-haiku-4-5": {
+      "in": 1.0,
+      "out": 5.0,
+      "cw5m": 1.25,
+      "cw1h": 2.0,
+      "cr": 0.1
+    },
+    "claude-fable-5-1": {
+      "in": 10.0,
+      "out": 50.0,
+      "cw5m": 12.5,
+      "cw1h": 20.0,
+      "cr": 0.25
+    },
+    "gemini-3.6-flash": {
+      "in": 0.75,
+      "out": 3.75,
+      "cw5m": 0.9375,
+      "cw1h": 1.5,
+      "cr": 0.075
+    },
+    "gemini-3.5-flash": {
+      "in": 0.75,
+      "out": 3.75,
+      "cw5m": 0.9375,
+      "cw1h": 1.5,
+      "cr": 0.075
+    },
+    "gemini-3.1-flash-lite": {
+      "in": 0.2,
+      "out": 1.0,
+      "cw5m": 0.25,
+      "cw1h": 0.4,
+      "cr": 0.02
+    },
+    "gemini-3.1-pro": {
+      "in": 2.0,
+      "out": 12.0,
+      "cw5m": 2.5,
+      "cw1h": 4.0,
+      "cr": 0.2
+    },
+    "gemini-3-pro": {
+      "in": 2.0,
+      "out": 12.0,
+      "cw5m": 2.5,
+      "cw1h": 4.0,
+      "cr": 0.2
+    },
+    "gemini-3.8-flash": {
+      "in": 0.75,
+      "out": 3.75,
+      "cw5m": 0.9375,
+      "cw1h": 1.5,
+      "cr": 0.075
+    },
+    "gemini-3.7-flash": {
+      "in": 0.75,
+      "out": 3.75,
+      "cw5m": 0.9375,
+      "cw1h": 1.5,
+      "cr": 0.075
+    }
+  },
+  "currency": {
+    "code": "INR",
+    "symbol": "\u20b9",
+    "per_usd": 95.56,
+    "_comment": "All costs are computed in USD then multiplied by per_usd. Set per_usd to 1 and code to USD for dollars."
+  }
+}
