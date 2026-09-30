@@ -3,6 +3,13 @@
   "_anthropic_source": "Anthropic list pricing. cache_write_5m = 1.25x input, cache_write_1h = 2x input, cache_read = 0.1x input.",
   "_google_source": "Public Gemini API pricing, Sept 2026. All Flash tiers (3.6/3.7/3.8) share $0.75 in / $3.75 out introductory rates through 2026-12-31, then double. Cache rates approximate.",
   "models": {
+    "claude-opus-5-5": {
+      "in": 4.0,
+      "out": 20.0,
+      "cw5m": 5.0,
+      "cw1h": 8.0,
+      "cr": 0.2
+    },
     "claude-opus-5": {
       "in": 5.0,
       "out": 25.0,
@@ -67,18 +74,18 @@
       "cr": 0.075
     },
     "gemini-3.5-flash": {
-      "in": 0.75,
-      "out": 3.75,
+      "in": 1.5,
+      "out": 9.0,
       "cw5m": 0.9375,
       "cw1h": 1.5,
-      "cr": 0.075
+      "cr": 0.15
     },
     "gemini-3.1-flash-lite": {
-      "in": 0.2,
-      "out": 1.0,
+      "in": 0.25,
+      "out": 1.5,
       "cw5m": 0.25,
       "cw1h": 0.4,
-      "cr": 0.02
+      "cr": 0.025
     },
     "gemini-3.1-pro": {
       "in": 2.0,
@@ -114,5 +121,9 @@
     "symbol": "\u20b9",
     "per_usd": 95.56,
     "_comment": "All costs are computed in USD then multiplied by per_usd. Set per_usd to 1 and code to USD for dollars."
+  },
+  "_synced": {
+    "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+    "at": "2026-09-30T21:42:30+00:00"
   }
 }

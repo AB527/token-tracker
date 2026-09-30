@@ -29,10 +29,83 @@ OMP_DIR = os.path.expanduser("~/.omp/agent/sessions")
 
 
 def load_pricing(path=None):
-    with open(path or os.path.join(HERE, "pricing.json")) as fh:
+    with open(path or os.path.join(HERE, "pricing.json"), encoding="utf-8") as fh:
         cfg = json.load(fh)
     cur = cfg.get("currency") or {"code": "USD", "symbol": "$", "per_usd": 1.0}
     return cfg["models"], cur
+
+
+LITELLM_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+
+# pricing.json field -> LiteLLM per-token field
+LITELLM_FIELDS = {
+    "in": "input_cost_per_token",
+    "out": "output_cost_per_token",
+    "cw5m": "cache_creation_input_token_cost",
+    "cw1h": "cache_creation_input_token_cost_above_1hr",
+    "cr": "cache_read_input_token_cost",
+}
+
+
+def _litellm_rates(table: dict, model: str):
+    """First-party rates for a model, or None. Prefers the Gemini API entry over Vertex,
+    and falls back to the -preview entry LiteLLM files some Gemini models under."""
+    for key in (f"gemini/{model}", model, f"gemini/{model}-preview", f"{model}-preview"):
+        e = table.get(key)
+        if e and e.get("input_cost_per_token") is not None:
+            return {f: round(e[k] * 1_000_000, 6) for f, k in LITELLM_FIELDS.items() if e.get(k) is not None}
+    return None
+
+
+def sync_pricing(path=None, url=LITELLM_URL, dry_run=False):
+    """Refresh pricing.json from LiteLLM's community price table.
+
+    Updates every model already listed, and adds any model seen in the local
+    logs that has no rate yet. Fields LiteLLM lacks (e.g. Gemini cache writes)
+    keep their local value; for new models they fall back to the Anthropic
+    multipliers (1.25x / 2x / 0.1x input).
+    """
+    import urllib.request
+
+    path = path or os.path.join(HERE, "pricing.json")
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        table = json.load(resp)
+
+    models = cfg["models"]
+    seen = {r["model"] for r in collect(models)}
+    changed = 0
+    for name in list(models) + sorted(seen - set(models)):
+        fresh = _litellm_rates(table, name)
+        if name not in models:
+            if not fresh:
+                print(f"  ? {name}: not in LiteLLM, still unpriced")
+                continue
+            i = fresh["in"]
+            models[name] = {"in": i, "out": fresh["out"], "cw5m": round(i * 1.25, 6),
+                            "cw1h": round(i * 2, 6), "cr": round(i * 0.1, 6)}
+            models[name].update(fresh)
+            print(f"  + {name}: {models[name]}")
+            changed += 1
+            continue
+        if not fresh:
+            print(f"  = {name}: not in LiteLLM, kept local rates")
+            continue
+        diff = {f: (models[name].get(f), v) for f, v in fresh.items() if models[name].get(f) != v}
+        if diff:
+            models[name].update(fresh)
+            print(f"  ~ {name}: " + ", ".join(f"{f} {a} -> {b}" for f, (a, b) in diff.items()))
+            changed += 1
+
+    if dry_run:
+        print(f"{changed} model(s) would change (dry run, nothing written)")
+        return
+    cfg["_synced"] = {"source": url, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    text = json.dumps(cfg, indent=2) + "\n"  # serialize first so a failure can't truncate the file
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    print(f"{changed} model(s) updated in {path}")
 
 
 def normalize_model(model: str) -> str:
@@ -460,6 +533,8 @@ def report(recs, args):
 # ---------------------------------------------------------------- cli
 
 def main():
+    # Windows defaults piped output to cp1252, which can't encode currency symbols like ₹.
+    sys.stdout.reconfigure(encoding="utf-8")
     p = argparse.ArgumentParser(description="Track token usage across Claude Code and omp.")
     p.add_argument("--days", type=int, help="only include the last N days")
     p.add_argument("--period", choices=["week", "month", "all"],
@@ -479,6 +554,9 @@ def main():
                    help="instrument the run: cache, execution and resource metrics")
     p.add_argument("--no-cache", action="store_true", help="bypass the parse cache")
     p.add_argument("--clear-cache", action="store_true", help="delete the parse cache and exit")
+    p.add_argument("--sync-pricing", action="store_true",
+                   help="refresh pricing.json (or --pricing) from LiteLLM's price table and exit")
+    p.add_argument("--dry-run", action="store_true", help="with --sync-pricing: show changes, write nothing")
     args = p.parse_args()
 
     if args.period:
@@ -487,6 +565,13 @@ def main():
     if args.clear_cache:
         shutil.rmtree(CACHE_DIR, ignore_errors=True)
         print(f"cleared {CACHE_DIR}")
+        return
+
+    global CACHE
+    CACHE = ParseCache(enabled=not args.no_cache)
+    if args.sync_pricing:
+        sync_pricing(args.pricing, dry_run=args.dry_run)
+        CACHE.evict()
         return
 
     rates, cur = load_pricing(args.pricing)
@@ -504,8 +589,6 @@ def main():
         import harness as harness_mod
         harness, recs = harness_mod.run(rates, args.days, sources, use_cache=not args.no_cache)
     else:
-        global CACHE
-        CACHE = ParseCache(enabled=not args.no_cache)
         recs = collect(rates, args.days, sources)
         CACHE.evict()
 

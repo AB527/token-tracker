@@ -180,6 +180,18 @@ Rates in `pricing.json` are USD per 1M tokens:
 "claude-opus-5":  {"in": 5.00, "out": 25.00, "cw5m": 6.25, "cw1h": 10.00, "cr": 0.50}
 ```
 
+To refresh rates from [LiteLLM's community price table](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json):
+
+```sh
+python tokentrack.py --sync-pricing --dry-run   # show what would change
+python tokentrack.py --sync-pricing             # write pricing.json
+```
+
+This updates every model already in `pricing.json` and adds any model in your
+logs that has no rate yet. Models LiteLLM doesn't list, and fields it lacks
+(Gemini cache writes), keep their local values. Review the diff before
+committing it: LiteLLM is community-maintained and new models can lag a few days.
+
 Display currency is converted from USD via the `currency` block:
 
 ```json
